@@ -1,0 +1,21 @@
+# 编译生成的文件和文件夹
+dist/
+build/
+# IDE相关
+.idea/
+.vscode/
+*.iml
+# 日志文件
+*.log
+# macOS特定
+.DS_Store
+# Windows特定
+Thumbs.db
+# 缓存文件
+node_modules/
+.cache/
+
+#自定义项
+console_output.txt
+test/
+.env

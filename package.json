@@ -1,0 +1,21 @@
+{
+  "name": "cheeriodemo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.5.0",
+    "md5": "^2.3.0",
+    "puppeteer": "^24.8.2",
+    "puppeteer-core": "^24.8.2",
+    "request": "^2.88.2"
+  }
+}
