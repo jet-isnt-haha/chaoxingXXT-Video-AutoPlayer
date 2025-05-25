@@ -77,6 +77,6 @@ HEADER_SEC_FETCH_SITE=same-origin'
 如果你有任何建议或发现了 bug，请提交 issue 或 pull request，我们将非常感谢你的贡献。
 
 ## 许可证
-本项目采用 ISC 许可证，详情请参阅 `LICENSE` 文件。
+本项目采用 MIT 许可证，详情请参阅 `LICENSE` 文件。
 
 > 本项目仅供学习交流使用
