@@ -49,7 +49,6 @@ const REQUEST_HEADERS = {
     'Sec-Fetch-Site': process.env.HEADER_SEC_FETCH_SITE 
 };
 
-console.log(REQUEST_HEADERS);
 //控制台输出置文本
 const outputLog = function(){
     // 创建可写流

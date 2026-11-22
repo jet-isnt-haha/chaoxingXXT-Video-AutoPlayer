@@ -1,270 +1,520 @@
-const axios = require('axios')
+const fs = require('fs');
+const path = require('path');
 const puppeteer = require('puppeteer');
 const md5 = require('md5');
-const {user,pwd,encSrcData,userAgent,baseURL,courseId,classId,prefixURL,outputLog,requestHeaders} =require('./config');
+const { user, pwd, userAgent, baseURL, courseId, classId, outputLog } = require('./config');
 
+/* 超新星学习通脚本（适配 2025/2026 版 mooc2-ans 页面） */
 
-/* 超新星学习通脚本 */
+//播放完成后上报接口的路径特征（兼容 mooc1 / mooc1-2 / mooc2 等不同域名）
+const LOG_URL_RE = /\/multimedia\/log\/a\//;
+//课程列表页（新版页面入口）
+const COURSE_LIST_URL = 'https://mooc1.chaoxing.com/visit/interaction';
+//md5 算法盐值
+const SALT = process.env.SALT || 'd_yHJ!$pdA~5';
+//单个视频最多等待多久（在视频时长基础上额外放宽的秒数）
+const EXTRA_WAIT_SECONDS = 300;
 
-//IIEF函数内实现
-(async ()=>{
-    //启动浏览器
-    const broswer = await puppeteer.launch({
-        headless:true,//关闭无头模式以便调试
-        args:['--no-sandbox','--disable-setuid-sandx']//用于绕过操作系统沙盒限制（常见于 Linux 或某些 CI 环境）。它们不直接影响 UI，但确保浏览器能正常启动。
-    })
-    //记录控制台输出
-    outputLog();
-    //控制浏览器打开新标签页
-    const page = await broswer.newPage();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    //调整视窗
-    await page.setViewport({width: 1920, height: 1080, deviceScaleFactor: 1 })
+//超星域名偶发 ERR_CONNECTION_CLOSED / ERR_ABORTED，带重试地打开页面
+async function gotoWithRetry(page, url, options = {}, retries = 3){
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await page.goto(url, options);
+        } catch (e) {
+            const msg = String(e.message).split('\n')[0];
+            console.log(`页面加载失败(${i + 1}/${retries}): ${msg}`);
+            if (i === retries - 1) { throw e; }
+            await sleep(3000);
+        }
+    }
+}
 
-    //设置用户代理（模拟真实环境）
-    await page.setUserAgent(userAgent)
+//优先使用本机已安装的浏览器，避免 Puppeteer 自带的 Chrome 未下载导致启动失败
+function resolveBrowserPath(){
+    if(process.env.PUPPETEER_EXECUTABLE_PATH){return process.env.PUPPETEER_EXECUTABLE_PATH;}
+    const candidates = [
+        path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Microsoft\\Edge\\Application\\msedge.exe'),
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser'
+    ];
+    return candidates.find(p=>p && fs.existsSync(p));
+}
 
-    //进入网站
-    await page.goto(baseURL,{waitUntil:'networkidle0'});
+//记录页面中的视频上报请求
+function collectLogRequests(page, bucket){
+    page.on('request', req => {
+        const url = req.url();
+        if (LOG_URL_RE.test(url)) {
+            bucket.push(url);
+        }
+    });
+}
 
-    //登录网页并进入个人中心
-    await  loginXXT(user,pwd,page)
+async function loginXXT(page){
+    await gotoWithRetry(page, baseURL, {waitUntil:'networkidle2', timeout:60000});
 
-    //进入相应课程并获取当前url下的cpi字段
-    await enterCourse(page,classId,courseId);
+    //已经登录过会直接进入个人空间
+    if (await page.$('#phone')) {
+        await page.evaluate((user,pwd)=>{
+            document.querySelector('#phone').value = user;
+            document.querySelector('#pwd').value = pwd;
+        }, user, pwd);
 
-    //选择第一章第一个进入学习
-    await enterFirstCourse(page);
+        await Promise.all([
+            page.waitForNavigation({waitUntil:'networkidle2', timeout:60000}).catch(()=>{}),
+            page.click('#loginBtn')
+        ]);
+    } else {
+        console.log('检测到已登录，跳过登录步骤');
+    }
+    console.log('登录完成，当前地址:', page.url());
+}
 
-    //开始运行脚本
-    await startScript(page,encSrcData,prefixURL,requestHeaders)
+//进入课程并打开“章节”标签页，返回章节 iframe 以及进入章节所需的 enc/cpi
+async function enterChapterTab(page){
+    await gotoWithRetry(page, COURSE_LIST_URL, {waitUntil:'networkidle2', timeout:60000});
+    await page.waitForFunction(
+        () => [...document.querySelectorAll('a')].some(a => a.href.includes('courseid=')),
+        {timeout:30000}
+    );
 
-    broswer.close();
-})();
+    const href = await page.evaluate((courseId, classId) => {
+        const link = [...document.querySelectorAll('a')].find(a =>
+            a.href.includes(`courseid=${courseId}`) && a.href.includes(`clazzid=${classId}`)
+        );
+        return link ? link.href : null;
+    }, courseId, classId);
 
-
-//开始运行脚本
-async function startScript(page,encSrcData,prefixURL,requestHeaders){
-
-//当前脚本运行位置（具体课程位置）
-let curIndex = '0-0-0'
-
-const cells = await page.$$('.showcontent .thiscontent .onetoone .cells');
-
-for(let k =0;k<cells.length;++k){
-    const ncells = await cells[k].$$('.ncells');
-
-    for(let j =0;j<ncells.length;++j ){
-    let _span =  await ncells[j].$('[id^="cur"] span[onclick]');
-
-    await page.evaluate( (el)=>{
-      el.click();
-
-    },_span)
-
-    page.waitForNavigation({waitUntil:'networkidle0'});
-
-    await new Promise((r) => setTimeout(r, 3000));
-
-    await page.waitForSelector('.left .content .main .tabtags span',{timeout:100000});
-
-    const spanLists = await page.$$('.left .content .main .tabtags span');
-
-        for(let i = 0;i<spanLists.length;++i){
-            curIndex=`第${k}章-第${j+1}节-${i+1}`
-
-        if(spanLists.length>1){
-        await spanLists[i].click();
+    if (!href) {
+        throw new Error(`课程列表中没有找到 courseId=${courseId}、classId=${classId} 的课程，请检查 .env 配置`);
     }
 
+    await gotoWithRetry(page, href, {waitUntil:'networkidle2', timeout:60000});
+    console.log('已进入课程页面:', page.url());
 
-    await new Promise((r) => setTimeout(r, 3000));
+    await page.waitForFunction(
+        () => [...document.querySelectorAll('li')].some(li => li.innerText.trim() === '章节'),
+        {timeout:30000}
+    );
+    await page.evaluate(() => {
+        const li = [...document.querySelectorAll('li')].find(li => li.innerText.trim() === '章节');
+        (li.querySelector('a') || li).click();
+    });
 
+    await page.waitForSelector('#frame_content-zj', {timeout:30000});
+    const frame = await (await page.$('#frame_content-zj')).contentFrame();
+    await frame.waitForSelector('.chapter_item[id^="cur"]', {timeout:30000});
+    //toOld() 里包含进入旧版章节页所需的 enc / cpi
+    await frame.waitForFunction(() => typeof window.toOld === 'function', {timeout:30000});
 
-    await playAndGetURL(page,encSrcData,prefixURL,curIndex,requestHeaders);
+    const meta = await frame.evaluate(() => {
+        const source = window.toOld.toString();
+        return {
+            enc: (source.match(/enc\s*=\s*"([^"]+)"/) || [])[1],
+            cpi: (source.match(/cpi\s*=\s*(\d+)/) || [])[1],
+            domain: (window.ServerHost && window.ServerHost.mooc1Domain) || 'https://mooc1.chaoxing.com'
+        };
+    });
+
+    if (!meta.enc || !meta.cpi) {
+        throw new Error('未能从章节页面解析出 enc / cpi，超星页面结构可能又变了');
+    }
+    return {frame, meta};
+}
+
+//查找下一个“已解锁”的小节（新版页面只给当前可学习的节点绑定 onclick）
+async function findNextPoint(frame, processed){
+    return frame.evaluate((processedList) => {
+        const done = new Set(processedList);
+        const items = [...document.querySelectorAll('.chapter_item[id^="cur"]')];
+        const describe = (item) => {
+            const name = ((item.innerText || '').trim().replace(/\s+/g, ' '))
+                .replace(/\d*个待完成任务点.*$/, '')
+                .replace(/\s+\d+$/, '')
+                .trim();
+            return {kid: item.id.replace(/^cur/, ''), name};
+        };
+
+        for (const item of items) {
+            const rawText = (item.innerText || '').trim().replace(/\s+/g, ' ');
+            const point = describe(item);
+            if (!point.kid || done.has(point.kid)) { continue; }
+            if (!item.hasAttribute('onclick')) { continue; }
+            //已完成的小节仍然带 onclick，但不再显示剩余任务数（如“1.2 xxx 2”）
+            if (!/个待完成任务点/.test(rawText) && !/\s+[1-9]\d*$/.test(rawText)) { continue; }
+            if (/练习|试卷|测验|作业|考试/.test(point.name)) {
+                return {...point, unsupported: true};
+            }
+            return point;
+        }
+        return null;
+    }, [...processed]);
+}
+
+function buildChapterUrl(meta, kid){
+    const params = new URLSearchParams({
+        chapterId: kid,
+        courseId,
+        clazzid: classId,
+        cpi: meta.cpi,
+        enc: meta.enc,
+        mooc2: '1',
+        hidetype: '0',
+        fanyaVersion: '0'
+    });
+    return `${meta.domain}/mycourse/studentstudy?${params.toString()}`;
+}
+
+//打开某个小节，返回承载视频的 cards iframe
+async function openKnowledgePoint(page, meta, point){
+    await gotoWithRetry(page, buildChapterUrl(meta, point.kid), {waitUntil:'domcontentloaded', timeout:60000});
+    try {
+        await page.waitForSelector('#iframe', {timeout:30000});
+    } catch (e) {
+        const text = await page.evaluate(() => document.body.innerText.slice(0, 200)).catch(() => '');
+        console.log('  页面未加载出内容:', text.replace(/\s+/g, ' '));
+        return null;
+    }
+    const cards = await (await page.$('#iframe')).contentFrame();
+    if (!cards) { return null; }
+    return cards;
+}
+
+//尝试秒过/补发完成上报：直接把 playingTime 上报为总时长
+async function tryFastPass(page, logUrl, action = '秒过'){
+    try {
+        const params = new URL(logUrl).searchParams;
+        const clazzId = params.get('clazzId');
+        const userid = params.get('userid');
+        const jobid = params.get('jobid');
+        const objectId = params.get('objectId');
+        const duration = Number(params.get('duration'));
+        if (!clazzId || !userid || !jobid || !objectId || !duration) { return false; }
+
+        const enc = md5(`[${clazzId}][${userid}][${jobid}][${objectId}][${duration * 1000}][${SALT}][${duration * 1000}][0_${duration}]`);
+        const target = new URL(logUrl);
+        target.searchParams.set('playingTime', String(duration));
+        target.searchParams.set('clipTime', `0_${duration}`);
+        target.searchParams.set('isdrag', '4');
+        target.searchParams.set('enc', enc);
+        target.searchParams.set('_t', String(Date.now()));
+
+        const text = await page.evaluate(async (url) => {
+            try {
+                const res = await fetch(url, {credentials:'include'});
+                return await res.text();
+            } catch (e) {
+                return '';
+            }
+        }, target.toString());
+
+        const passed = /"isPassed"\s*:\s*true/.test(text);
+        console.log(passed ? `  ${action}成功` : `  ${action}失败（返回：${text.slice(0,80)}）`);
+        return passed;
+    } catch (e) {
+        console.log(`  ${action}异常:`, e.message);
+        return false;
+    }
+}
+
+//重新定位某个知识点下的第 index 个视频 iframe（页面/播放器刷新后使用）
+async function findVideoFrame(page, index){
+    try {
+        const cardsHandle = await page.$('#iframe');
+        if (!cardsHandle) { return null; }
+        const cards = await cardsHandle.contentFrame();
+        if (!cards) { return null; }
+        const handles = await cards.$$('iframe.ans-insertvideo-online');
+        const handle = handles[index] || handles[0];
+        if (!handle) { return null; }
+        return (await handle.contentFrame()) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+//新版播放器默认只允许一个视频播放；这里移除暂停调用，让同一知识点的多个视频可以并行播放
+function prepareFrameInPage(){
+    const proto = HTMLMediaElement.prototype;
+    if (!proto.__autoPlayerPausePatched) {
+        proto.__autoPlayerPausePatched = true;
+        proto.pause = function(){};
+    }
+    const video = document.querySelector('video');
+    if (video) {
+        video.muted = true;
+        if (video.paused) { video.play().catch(()=>{}); }
+    }
+    const btn = document.querySelector('.vjs-big-play-button');
+    if (btn) { btn.click(); }
+}
+
+async function prepareVideoFrame(frame){
+    await frame.waitForSelector('video', {timeout:20000}).catch(()=>{});
+    await frame.evaluate(prepareFrameInPage).catch(()=>{});
+    await sleep(1000);
+}
+
+//学习一个知识点下的所有视频（多个视频并行播放，节省总时长）
+async function studyKnowledgePoint(page, meta, point, logUrls){
+    console.log(`\n[${point.name}]`);
+    const cards = await openKnowledgePoint(page, meta, point);
+    if (!cards) {
+        console.log('  页面未加载出内容，跳过');
+        return;
+    }
+
+    let videoHandles = [];
+    try {
+        await cards.waitForSelector('iframe.ans-insertvideo-online', {timeout:10000});
+        videoHandles = await cards.$$('iframe.ans-insertvideo-online');
+    } catch (e) {
+        console.log('  无视频任务点（可能是练习/文档），跳过');
+        return;
+    }
+
+    //读取任务点信息，用于判断哪些视频已经学完
+    const attachments = await cards.evaluate(() => {
+        try {
+            return (window.mArg && window.mArg.attachments || []).map(a => ({
+                objectId: a.objectId,
+                duration: Number(a.attDuration) || 0,
+                playTime: Number(a.playTime) || 0
+            }));
+        } catch (e) {
+            return [];
+        }
+    }).catch(() => []);
+
+    const pointLogStart = logUrls.length;
+    const active = [];
+
+    for (let i = 0; i < videoHandles.length; i++) {
+        const frame = await videoHandles[i].contentFrame();
+        if (!frame) { continue; }
+        await frame.waitForSelector('video', {timeout:20000}).catch(()=>{});
+        const ids = await frame.evaluate(() => ({
+            objectId: window.videoObjectId || '',
+            jobId: window.videoJobId || ''
+        })).catch(() => null);
+        if (!ids) { continue; }
+
+        const attachment = attachments.find(a => a.objectId === ids.objectId);
+        if (attachment && attachment.duration) {
+            const watched = attachment.playTime / 1000;
+            if (watched >= attachment.duration - 2) {
+                console.log(`  视频${i + 1}已学完（${Math.round(watched)}/${attachment.duration}s），跳过`);
+                continue;
+            }
+            console.log(`  视频${i + 1}：已观看 ${Math.round(watched)}/${attachment.duration}s，继续播放`);
+        }
+
+        await prepareVideoFrame(frame);
+        active.push({
+            index: i,
+            frame,
+            jobId: ids.jobId,
+            duration: (attachment && attachment.duration) || 0,
+            done: false
+        });
+    }
+
+    if (!active.length) {
+        console.log('  该知识点的视频都已学完');
+        return;
+    }
+    console.log(`  开始并行播放 ${active.length} 个视频`);
+
+    //等待每个视频产生第一条上报，顺便尝试秒过（未开防拖拽的课程可以直接完成）
+    const wantJobs = new Set(active.map(a => a.jobId).filter(Boolean));
+    const preDeadline = Date.now() + 20000;
+    while (Date.now() < preDeadline) {
+        const gotJobs = new Set(logUrls.slice(pointLogStart).map(u => new URL(u).searchParams.get('jobid')));
+        if ([...wantJobs].every(jobid => gotJobs.has(jobid))) { break; }
+        await sleep(1000);
+    }
+
+    let latestByJob = new Map();
+    for (const url of logUrls.slice(pointLogStart)) {
+        const jobid = new URL(url).searchParams.get('jobid');
+        if (jobid) { latestByJob.set(jobid, url); }
+    }
+    for (const item of active) {
+        const url = item.jobId ? latestByJob.get(item.jobId) : null;
+        if (url && await tryFastPass(page, url, '秒过')) {
+            item.done = true;
+        }
+    }
+    if (active.every(a => a.done)) {
+        console.log('  所有视频秒过成功');
+        return;
+    }
+
+    const startTime = Date.now();
+    let maxDuration = Math.max(...active.map(a => a.duration || 0), 0);
+    let tick = 0;
+    let lastProgressLog = 0;
+
+    while (true) {
+        await sleep(5000);
+        tick++;
+
+        //定期把页面拉到前台并移动鼠标，避免被判定为“离开页面/长时间无操作”
+        if (tick % 4 === 0) {
+            await page.bringToFront().catch(()=>{});
+            await page.mouse.move(500 + Math.floor(Math.random() * 300), 400 + Math.floor(Math.random() * 200)).catch(()=>{});
+        }
+
+        for (const item of active) {
+            if (item.done) { continue; }
+            let state = null;
+            try {
+                state = await item.frame.evaluate(() => {
+                    const v = document.querySelector('video');
+                    return v ? {
+                        current: v.currentTime,
+                        duration: v.duration,
+                        paused: v.paused,
+                        ended: v.ended
+                    } : null;
+                });
+            } catch (e) {
+                //播放器刷新后重新定位
+                const refreshed = await findVideoFrame(page, item.index);
+                if (!refreshed) {
+                    console.log(`  视频${item.index + 1}的播放器已丢失，跳过`);
+                    item.done = true;
+                } else {
+                    item.frame = refreshed;
+                    await prepareVideoFrame(refreshed);
+                }
+                continue;
+            }
+
+            if (!state) { item.done = true; continue; }
+            if (state.duration && state.duration > maxDuration) { maxDuration = state.duration; }
+            if (state.ended || (state.duration && state.current >= state.duration - 0.5)) {
+                item.done = true;
+                continue;
+            }
+            if (state.paused) {
+                await item.frame.evaluate(() => {
+                    const v = document.querySelector('video');
+                    if (v && v.paused) { v.play().catch(()=>{}); }
+                }).catch(()=>{});
             }
         }
-    }
 
-console.log('脚本运行完毕');
-}
+        if (Date.now() - lastProgressLog >= 60000) {
+            lastProgressLog = Date.now();
+            const progress = [];
+            for (const item of active) {
+                if (item.done) { progress.push('已完成'); continue; }
+                try {
+                    const current = await item.frame.evaluate(() => {
+                        const v = document.querySelector('video');
+                        return v ? Math.floor(v.currentTime) : 0;
+                    });
+                    progress.push(`${current}/${Math.floor(item.duration || 0)}s`);
+                } catch (e) {}
+            }
+            if (progress.length) { console.log('    播放进度：', progress.join(' | ')); }
+        }
 
-//选择进入第一章第一节
-async function  enterFirstCourse(page) {
-        const firstUnit = await page.$('.main .left .content1 .timeline .units ');
-    if(firstUnit){
-    const aHref = await firstUnit.$eval('.leveltwo h3.clearfix a',el=>el.href);
+        if (active.every(a => a.done)) {
+            console.log('  所有视频播放结束');
+            break;
+        }
 
-    await page.goto(aHref,{waitUntil:'networkidle2'});
-    }
-}
-
-//进入课程
-async function enterCourse(page,classId,courseId){
-
-    const targetFrameHandle = await page.$('.con .con-right.style3 .center iframe#frame_content')
-    const targetFrame = await targetFrameHandle.contentFrame();
-    const targetLi = await targetFrame.$(`.Wrapbody .zmodel ul.clearfix li.courseItem:has(input[name="courseId"][value="${courseId}"])`+`:has(input[name="classId"][value="${classId}"])`)
-    if(targetLi){
-        const aHref = await targetLi.$eval('div.Mcon1img.httpsClass a',el=>el.href);
-
-        await page.goto(aHref,{waitUntil:'networkidle2'})
-    // 或者使用Promise.all的写法（适用于通过点击等方式触发导航）
-    // await Promise.all([
-    //   page.waitForNavigation({ waitUntil: 'networkidle2' }),
-    //   page.goto(aHref)
-    // ]);
-    //         networkidle0：等待网络请求数为 0（没有活跃请求）。
-    //networkidle2：等待网络请求数 ≤2（适用于有少量长连接的场景，如 WebSocket）。
-}
-}
-
-//获取网络请求完成播放
-async function setPassToTrue(enc,encSrcData,url,cookieString,page,requestHeaders){
-    //处理api
-    const originUrl = new URL(url);
-    originUrl.searchParams.set('playingTime',encSrcData.duration);
-    originUrl.searchParams.set('enc',enc);
-     originUrl.searchParams.set('isdrag','4');
-    let passedUrl = originUrl.toString();
-    const option ={
-        method:'GET',
-        headers:{
-      ...requestHeaders,
-      'Cookie': cookieString,
+        if (Date.now() - startTime > (maxDuration + EXTRA_WAIT_SECONDS) * 1000) {
+            console.log('  等待视频播放超时，进入下一个知识点');
+            break;
         }
     }
-    //循环发送破译请求
-    while(1){
-        let flag = false;
-    await axios.get(passedUrl,option).then((res)=>{
-        console.log(res.data);
-        flag=res.data.isPassed;
-        console.log('尝试解密中');
-    }).catch(err=>{
-        console.log('错误error',err);
-    })
-    if(flag){
-        console.log('解密成功');
-        break;
-    }else{
-        console.log('本次解密失败');
+
+    //等待播放结束后的最后一次上报
+    await sleep(10000);
+    const icons = await cards.evaluate(() =>
+        [...document.querySelectorAll('.ans-job-icon')].map(e => e.className)
+    ).catch(() => []);
+    console.log('  任务点状态:', icons.join(' | ') || '未知');
+
+    //按 jobid 分组，对每个视频补发一次完成上报（此时真实观看时长已经满足要求）
+    latestByJob = new Map();
+    for (const url of logUrls.slice(pointLogStart)) {
+        const jobid = new URL(url).searchParams.get('jobid');
+        if (jobid) { latestByJob.set(jobid, url); }
     }
-    await new Promise((r)=>setTimeout(r,4000));
-}
-}
-
-//获取播放完成的加密数据
-async  function gainEncryption(encSrcData){
-     let str = `[${encSrcData.clazzId}][${encSrcData.userid}][${encSrcData.jobid}][${encSrcData.objectId}][${encSrcData.playingTime*1000}][d_yHJ!$pdA~5][${encSrcData.duration*1000}][${encSrcData.clipTime}]`;
-    return md5(str);
-}
-
-//播放视频获取url进行检查或解密
-async function playAndGetURL(page,encSrcData,prefixURL,curIndex,requestHeaders){
- // 等待外层 DOM 加载
-   try {
-    await page.waitForSelector('.left .content .main .course_main', { timeout: 10000 });
-
-    // 找到第一个 iframe（class="course_main" 下的 iframe）
-    await page.waitForSelector('.course_main iframe', { timeout: 10000 });
-    const frame1Handle = await page.$('.course_main iframe');
-    const frame1 = await frame1Handle.contentFrame();
-
-    // 在第一个 iframe 中定位 .wrap .ans-cc .editor-iframe 下的第二个 iframe
-  
-    await frame1.waitForSelector('.wrap .ans-cc p.editor-iframe #ext-gen1050 iframe.ans-attach-online.ans-insertvideo-online', { timeout: 10000 });
-    const frame2Handle = await frame1.$('.wrap .ans-cc p.editor-iframe #ext-gen1050 iframe.ans-attach-online.ans-insertvideo-online');
-
-/*     if (!frame2Handle) {
-        console.log('frame2Handle 未找到');
-        return;
-    } */
-    const frame2 = await frame2Handle.contentFrame();
-/*     if (!frame2) {
-        console.log('frame2 未获取到');
-        return;
-    }  */
-
-    // 在第二个 iframe 中定位并点击按钮
-    await frame2.waitForSelector('.main.clearfix .prev_video_left .fullScreenContainer #reader #video button', { timeout: 100000 });
-  
-    console.log('已找到播放按键点击以获取请求');
-    const btn = await frame2.$('.main.clearfix .prev_video_left .fullScreenContainer #reader #video button');
-    if (btn) {
-        await btn.click();
-    } else {
-        console.log('按钮未找到，无法点击');
-        return;
+    for (const [jobid, url] of latestByJob) {
+        await tryFastPass(page, url, '完成上报');
     }
-    }catch (error) {
-    // 处理其他类型的错误
-    console.error('未知的错误:当前页面没有视频可以打开,进入下一个小节', error);
-    return;
 }
-    //获取url并检测是否已经完成播放若是则跳过
-    const reqUrl = {
-        _url:-1
+
+(async ()=>{
+    const browser = await puppeteer.launch({
+        headless:true,
+        executablePath: resolveBrowserPath(),
+        args:[
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--autoplay-policy=no-user-gesture-required',
+            '--mute-audio',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding'
+        ]
+    });
+
+    outputLog();
+
+    try {
+        const page = await browser.newPage();
+        await page.setViewport({width: 1920, height: 1080, deviceScaleFactor: 1});
+        await page.setUserAgent(userAgent);
+        page.on('dialog', async dialog => {
+            try { await dialog.dismiss(); } catch (e) {}
+        });
+
+        const logUrls = [];
+        collectLogRequests(page, logUrls);
+
+        await loginXXT(page);
+
+        //新版课程按顺序解锁：只有当前可学习的知识点才带 onclick。
+        //因此每学完一个知识点就重新打开章节页，获取下一个已解锁节点。
+        const processed = new Set();
+        let round = 0;
+        while (true) {
+            const {frame, meta} = await enterChapterTab(page);
+            const next = await findNextPoint(frame, processed);
+
+            if (!next) {
+                console.log('没有更多已解锁的知识点了（可能已完成，或后续章节尚未开放）');
+                break;
+            }
+            if (next.unsupported) {
+                console.log(`下一个待完成任务是「${next.name}」，脚本只处理视频，已停止`);
+                break;
+            }
+
+            round++;
+            await studyKnowledgePoint(page, meta, next, logUrls);
+            processed.add(next.kid);
+            console.log(`已完成第 ${round} 个待学习小节：${next.name}`);
+        }
+
+        console.log('\n脚本运行完毕');
+    } catch (e) {
+        console.error('脚本运行出错:', e);
+    } finally {
+        await browser.close();
     }
-    const reqPrmoise =page.waitForRequest((req)=>req.method() === 'GET' && req.url().startsWith(prefixURL),{timeout:100000})
-
-    reqUrl._url=(await reqPrmoise).url()
-
-        
-    const cookieString = await getCookies(page);
-
-    const res= await axios.get(reqUrl._url,{
-        method:'GET',
-        headers:{
-           'Connection': requestHeaders.Connection,
-            'Content-Type': requestHeaders.ContentType,
-            'Accept': requestHeaders.Accept,
-            'cookie':cookieString,
-            'Host': requestHeaders.Host,
-           'Accept-Encoding':requestHeaders.AcceptEncoding,
-            'User-Agent': requestHeaders.UserAgent,
-        }})
-        if(res.data.isPassed){
-             console.log(curIndex,'已学习完成');
-        }else{
-            console.log(curIndex,'还未学习进行解密');
-        //若还没学习则进行解密
-  const {clazzId,duration,clipTime,objectId,userid,jobid} =Object.fromEntries(((new URL(reqUrl._url)).searchParams));
-    encSrcData.clazzId=clazzId;
-    encSrcData.duration=duration;
-    encSrcData.clipTime=clipTime;
-    encSrcData.objectId=objectId;
-    encSrcData.userid=userid;
-    encSrcData.jobid=jobid;
-    encSrcData.playingTime=duration;
-    const enc = await gainEncryption(encSrcData);
-    await setPassToTrue(enc,encSrcData,reqUrl._url,cookieString,page,requestHeaders);
-    }
-
-}
-
-//登录网页逻辑
-async function loginXXT(user,pwd,page){
-    //等待用户名输入框加载
-    await page.waitForSelector('#phone',{timeout:10000});
-
-    //输入用户名和密码
-    console.log(user,pwd);
-    await page.evaluate((user,pwd)=>{
-        document.querySelector('#phone').value = user;
-        document.querySelector('#pwd').value = pwd;
-    },user,pwd)
-
-    //点击登录按钮
-    await page.click('#loginBtn');
-
-    await page.waitForNavigation({waitUntil:'networkidle0'});
-}
-
-//获取cookies
-async function getCookies(page){
-    const cookies = await page.cookies();
-    cookies.push({name:'source',value:'num3'},{name:'orgfid',value:'43843'},{name:'thirdRegist',value:'0'})
-    const cookieString = cookies.map(cookie=>`${cookie.name}=${cookie.value}`).join(';');
-    return cookieString;
-}
+})();

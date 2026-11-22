@@ -1,82 +1,137 @@
 # XXT-Video-AutoPlayer
 
-## 简介
-`XXT-Video-AutoPlayer` 是一个基于 Node.js 的自动化脚本，利用 Puppeteer 库实现超新星平台课程视频的自动播放和学习进度完成功能。脚本通过模拟用户登录、进入课程、点击播放按钮、获取网络请求等操作，自动处理视频播放和学习进度更新，节省用户手动操作的时间和精力。
+基于 Node.js + Puppeteer 的超星学习通（chaoxing.com）课程视频自动播放脚本。已适配 2025/2026 新版 `mooc2-ans` 课程页面：自动登录、进入指定课程、遍历章节中的知识点、自动播放视频并等待任务点完成。
+
+> 本项目仅供学习交流使用，请遵守平台服务条款和当地法律法规。
 
 ## 功能特性
-1. **自动登录**：根据配置文件中的用户名和密码，自动登录超新星平台。
-2. **课程导航**：自动进入指定课程和班级，遍历课程章节和小节。
-3. **视频播放**：定位并点击视频播放按钮，获取播放相关的网络请求。
-4. **学习进度更新**：检查视频是否已学习完成，若未完成则尝试解密并更新学习进度。
-5. **日志记录**：将控制台输出记录到文件中，方便后续查看和调试。
 
-## 安装步骤
-1. **克隆仓库**
-    ```bash
-    git clone https://github.com/your-repo/XXT-Video-AutoPlayer.git
-    cd XXT-Video-AutoPlayer
-    ```
-2. **安装依赖**
-    ```bash
-    pnpm install
-    ```
+1. **自动登录**：使用 `.env` 中的账号密码登录超星。
+2. **自动进入课程**：根据 `COURSE_ID` / `CLASS_ID` 在“我学的课”中定位课程，并打开新版“章节”页。
+3. **按顺序解锁**：新版课程按顺序开放知识点，脚本只处理当前已解锁的节点，完成后刷新章节页继续下一个。
+4. **并行播放**：同一知识点下的多个视频会同时播放，知识点耗时约等于最长的那一个视频，而不是逐个累加。
+5. **断点续播**：通过任务点的 `playTime` 跳过已学完的视频，未学完的从上次进度继续。
+6. **任务点完成**：先尝试“秒过”（适用于未开启防拖拽的课程）；失败时按真实时长播放，结束后再补发一次完成上报。
+7. **日志记录**：控制台输出同时写入 `src/console_output.txt`。
 
-## 配置文件
-在项目根目录下创建 `.env` 文件，配置以下信息：
-```plaintext
-# 用户账号配置
-USER=your_username
-PWD=your_password
+## 环境要求
 
-# 课程配置（可通过查询字符串找到）
-COURSE_ID=your_course_id
-CLASS_ID=your_class_id
+- Node.js 18 及以上（推荐 20+）
+- 本机已安装 Chrome 或 Edge
 
-#md5算法盐值
-SALT=d_yHJ!$pdA~5
+脚本会优先使用本机浏览器；如果找不到，再使用 Puppeteer 自带的 Chrome。也可以手动安装 Puppeteer 浏览器：
 
-#用户代理环境
-USER_AGENT = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0
-#脚本进入的初始地址
-BASE_URL = https://i.chaoxing.com/
-
-#播放视频后触发的网络请求前缀
-PREFIX_URL = https://mooc1-2.chaoxing.com/mooc-ans/multimedia/log/a
-
-# 请求头配置（可选修改）
-HEADER_CONNECTION=keep-alive
-HEADER_CONTENT_TYPE=application/json
-HEADER_ACCEPT=*/*
-HEADER_HOST=mooc1-2.chaoxing.com
-HEADER_ACCEPT_ENCODING=gzip, deflate, br, zstd
-HEADER_ACCEPT_LANGUAGE=en-CN,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,en-GB;q=0.6,en-US;q=0.5
-HEADER_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
-HEADER_REFERER=https://mooc1-2.chaoxing.com/ananas/modules/video/index.html
-HEADER_SEC_CH_UA="Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"
-HEADER_SEC_CH_UA_MOBILE=?0
-HEADER_SEC_CH_UA_PLATFORM=Windows
-HEADER_SEC_FETCH_DEST=empty
-HEADER_SEC_FETCH_MODE=cors
-HEADER_SEC_FETCH_SITE=same-origin' 
+```bash
+npx puppeteer browsers install chrome
 ```
 
-## 使用方法
-1. 确保 `.env` 文件已正确配置。
-2. 运行脚本
-    ```bash
-    node xxt-script.js
-    ```
-3. 脚本运行过程中，控制台输出将同时记录到 `console_output.txt` 文件中。
+## 安装
+
+```bash
+pnpm install
+```
+
+（使用 npm 也可以：`npm install`）
+
+## 配置
+
+在项目根目录创建 `.env`（可从 `.env.example` 复制），至少填写：
+
+```plaintext
+# 账号
+USER=你的手机号
+PWD=你的密码
+
+# 课程配置
+COURSE_ID=课程ID
+CLASS_ID=班级ID
+
+# 用户代理
+USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
+
+# 登录入口
+BASE_URL=https://i.chaoxing.com/
+
+# md5 盐值（秒过时使用）
+SALT=d_yHJ!$pdA~5
+```
+
+`COURSE_ID` 和 `CLASS_ID` 的获取方式：
+
+1. 登录后打开 <https://mooc1.chaoxing.com/visit/interaction>；
+2. 点击目标课程进入课程页；
+3. 地址栏中 `courseid=` 后面是 `COURSE_ID`，`clazzid=` 后面是 `CLASS_ID`。
+
+> `PREFIX_URL` 及 `HEADER_*` 仍然保留在 `.env.example` 中用于兼容旧配置，但新版脚本不再依赖它们（上报接口按路径 `/multimedia/log/a/` 自动识别，请求头由浏览器自动携带）。
+
+## 运行
+
+在**项目根目录**执行：
+
+```bash
+pnpm start
+# 或者
+node src/xxt-script.js
+```
+
+运行时不要关闭终端；脚本会依次处理所有章节，视频较多时需要较长时间。
+
+## 工作原理
+
+1. 登录后进入 `https://mooc1.chaoxing.com/visit/interaction`，按 `COURSE_ID` + `CLASS_ID` 找到课程；
+2. 打开课程页的“章节”标签，找出当前**已解锁**（带 `onclick`）的知识点；
+3. 打开该知识点的 `studentstudy` 页面，在 `#iframe` 中查找视频 iframe（`iframe.ans-insertvideo-online`）；
+4. 点击播放，从浏览器的 `/multimedia/log/a/` 上报请求中取得 `duration`、`jobid`、`objectId` 等信息；
+5. 先尝试一次性上报完成（`isdrag=4`）；如果课程开启了防拖拽会返回 `isPassed:false`，此时脚本会继续正常播放，直到视频结束；
+6. 同一知识点下的多个视频会并行播放，播放结束后按 `jobid` 分别补发完成上报；
+7. 刷新章节页继续下一个已解锁知识点。
 
 ## 注意事项
-- 请确保你的 Node.js 版本符合项目依赖的要求。
-- 脚本运行过程中可能会受到网络环境、页面结构变化等因素的影响，请根据实际情况进行调整。
-- 使用本脚本应遵守超新星平台的使用条款和相关法律法规，请勿用于非法或违规目的。
 
-## 贡献
-如果你有任何建议或发现了 bug，请提交 issue 或 pull request，我们将非常感谢你的贡献。
+- **防拖拽课程只能按真实时长播放**：超星开启了“不可拖拽/不可倍速”的课程无法秒过，脚本会按视频实际时长播放。课程视频总时长决定了运行时间。
+- **按顺序学习**：新版课程通常是“完成当前知识点后才解锁下一个”，脚本每完成一个知识点会重新打开章节页获取下一个节点。
+- 如果下一个待完成任务是练习题、试卷或文档，脚本会提示并停止（本项目只处理视频）。
+- 新版页面中同一知识点可能包含多个视频，脚本会**同时播放**这些视频，耗时约等于最长视频的时长；已学完的视频会跳过。
+- 脚本会定时把页面置于前台并移动鼠标，避免播放器因“离开页面/长时间无操作”而暂停。
+- 如果平台提示“本次学习时长已达上限”，请隔一段时间再运行，或分章节运行。
+- 播放依赖浏览器中的 video.js 播放器，请保持网络畅通；页面结构若再次大改，脚本的选择器可能还需要调整。
+- 脚本使用无头浏览器（headless），弹出窗口、验证码等情况无法自动处理；遇到登录验证请在配置中换用可正常登录的网络环境。
+
+## 常见问题
+
+**启动时报 `Could not find Chrome`**
+
+说明既没有安装本机 Chrome/Edge，也没有下载 Puppeteer 自带浏览器。安装 Chrome，或执行：
+
+```bash
+npx puppeteer browsers install chrome
+```
+
+**提示“课程列表中没有找到 courseId=... 的课程”**
+
+`COURSE_ID` / `CLASS_ID` 填错，或当前账号没有加入该课程。按上面的方式重新从课程页地址栏复制。
+
+**提示“未能从章节页面解析出 enc / cpi”**
+
+超星页面结构发生变化，需要更新 `src/xxt-script.js` 中 `enterChapterTab()` 的解析逻辑。
+
+**控制台一直显示“秒过失败，改为正常播放”**
+
+该课程开启了防拖拽，这是正常现象，脚本会继续按真实时长播放。
+
+## 目录结构
+
+```plaintext
+.
+├── .env.example        # 配置示例
+├── package.json
+├── pnpm-lock.yaml
+├── README.md
+└── src
+    ├── config.js       # 读取 .env、日志输出
+    └── xxt-script.js   # 主脚本
+```
 
 ## 许可证
-本项目采用 MIT 许可证，详情请参阅 `LICENSE` 文件。
 
-> 本项目仅供学习交流使用
+MIT，详情见 `LICENSE`。
