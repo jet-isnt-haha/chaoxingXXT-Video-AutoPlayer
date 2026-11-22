@@ -252,6 +252,10 @@ function prepareFrameInPage(){
     const video = document.querySelector('video');
     if (video) {
         video.muted = true;
+        //进度已到结尾但任务点未通过时，从头播放以重新产生学习上报
+        if (video.ended || (isFinite(video.duration) && video.duration > 0 && video.currentTime >= video.duration - 1)) {
+            try { video.currentTime = 0; } catch (e) {}
+        }
         if (video.paused) { video.play().catch(()=>{}); }
     }
     const btn = document.querySelector('.vjs-big-play-button');
@@ -288,7 +292,8 @@ async function studyKnowledgePoint(page, meta, point, logUrls){
             return (window.mArg && window.mArg.attachments || []).map(a => ({
                 objectId: a.objectId,
                 duration: Number(a.attDuration) || 0,
-                playTime: Number(a.playTime) || 0
+                playTime: Number(a.playTime) || 0,
+                isPassed: a.isPassed === true || a.isPassed === 'true' || a.isPassed === 1
             }));
         } catch (e) {
             return [];
@@ -311,11 +316,16 @@ async function studyKnowledgePoint(page, meta, point, logUrls){
         const attachment = attachments.find(a => a.objectId === ids.objectId);
         if (attachment && attachment.duration) {
             const watched = attachment.playTime / 1000;
-            if (watched >= attachment.duration - 2) {
-                console.log(`  视频${i + 1}已学完（${Math.round(watched)}/${attachment.duration}s），跳过`);
+            //只有服务端明确标记 isPassed 才算完成；playTime 到了结尾但未通过时仍需重新上报
+            if (attachment.isPassed) {
+                console.log(`  视频${i + 1}已通过（${Math.round(watched)}/${attachment.duration}s），跳过`);
                 continue;
             }
-            console.log(`  视频${i + 1}：已观看 ${Math.round(watched)}/${attachment.duration}s，继续播放`);
+            if (watched >= attachment.duration - 2) {
+                console.log(`  视频${i + 1}进度已到结尾但任务点未通过，重新上报完成`);
+            } else {
+                console.log(`  视频${i + 1}：已观看 ${Math.round(watched)}/${attachment.duration}s，继续播放`);
+            }
         }
 
         await prepareVideoFrame(frame);
@@ -499,6 +509,9 @@ async function studyKnowledgePoint(page, meta, point, logUrls){
 
             if (!next) {
                 console.log('没有更多已解锁的知识点了（可能已完成，或后续章节尚未开放）');
+                if (processed.size) {
+                    console.log('提示：如果页面中仍有未完成的内容，说明上一个知识点还有任务点未通过，请查看上面的日志');
+                }
                 break;
             }
             if (next.unsupported) {
