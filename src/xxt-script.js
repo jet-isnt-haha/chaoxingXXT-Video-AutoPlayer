@@ -3,6 +3,7 @@ const path = require('path');
 const puppeteer = require('puppeteer');
 const md5 = require('md5');
 const { user, pwd, userAgent, baseURL, courseId, classId, outputLog } = require('./config');
+const { solveExercise } = require('./exercise');
 
 /* 超新星学习通脚本（适配 2025/2026 版 mooc2-ans 页面） */
 
@@ -501,8 +502,15 @@ async function studyKnowledgePoint(page, meta, point, logUrls){
                 break;
             }
             if (next.unsupported) {
-                console.log(`下一个待完成任务是「${next.name}」，脚本只处理视频，已停止`);
-                break;
+                round++;
+                const ok = await solveExercise(page, meta, next, openKnowledgePoint);
+                if (!ok) {
+                    console.log(`练习题「${next.name}」未能完成，脚本停止`);
+                    break;
+                }
+                processed.add(next.kid);
+                console.log(`已完成第 ${round} 个待学习小节：${next.name}`);
+                continue;
             }
 
             round++;

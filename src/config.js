@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config({path:path.join(__dirname,'../.env')});//加载环境变量
+require('dotenv').config({path:path.join(__dirname,'../.env'), override:true});//加载环境变量
 //用户名
 const USER =process.env.USER;
 //密码
@@ -30,6 +30,11 @@ const CLASS_ID = process.env.CLASS_ID;
 
 //播放视频后触发的网络请求前缀
 const PREFIX_URL = process.env.PREFIX_URL;
+
+//大模型配置（用于自动完成练习题）
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
 // 从环境变量读取请求头配置
 const REQUEST_HEADERS = {
@@ -76,5 +81,8 @@ module.exports={
     classId:CLASS_ID,
     prefixURL:PREFIX_URL,
     requestHeaders: REQUEST_HEADERS,
+    deepseekApiKey: DEEPSEEK_API_KEY,
+    deepseekModel: DEEPSEEK_MODEL,
+    deepseekBaseUrl: DEEPSEEK_BASE_URL,
     outputLog
 }
