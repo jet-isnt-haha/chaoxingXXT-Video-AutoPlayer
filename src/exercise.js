@@ -47,14 +47,19 @@ async function extractWork(frame){
                     qid: li.getAttribute('qid') || '',
                 };
             });
-            const textarea = q.querySelector('textarea');
-            const fillName = textarea ? (textarea.name || '') : '';
-            const fillMatch = fillName.match(/answerEditor(\d+)/);
+            const textareas = [...q.querySelectorAll('textarea')];
+            const fillNames = textareas.map(t => t.name || '');
+            const fillMatch = fillNames.length ? fillNames[0].match(/^answerEditor(\d+)$/) : null;
+            const fillFull = fillMatch ? fillMatch[1] : '';
+            //answerEditor<qid><blankIndex>，去掉最后一位就是题目 qid
+            const fillQid = fillFull ? fillFull.slice(0, -1) : '';
             const first = optionEls[0];
             return {
                 index,
-                qid: options[0] ? options[0].qid : (fillMatch ? fillMatch[1] : ''),
-                fillQid: fillMatch ? fillMatch[1] : '',
+                qid: options[0] ? options[0].qid : fillQid,
+                fillQid,
+                fillBlanks: textareas.length,
+                fillNames,
                 qtype: first ? (first.getAttribute('qtype') || '0') : 'fill',
                 title: titleEl ? titleEl.innerText : '',
                 options,
@@ -74,15 +79,17 @@ async function decodeQuestions(frame, raw, mapping){
         }));
         let type = 'single';
         let qid = q.qid;
+        let blanks = 0;
         if (q.fillQid) {
             type = 'fill';
-            qid = q.fillQid.endsWith('1') ? q.fillQid.slice(0, -1) : q.fillQid;
+            qid = q.fillQid;
+            blanks = q.fillBlanks || 1;
         } else if (q.qtype === '1') {
             type = 'multi';
         } else if (q.qtype === '3') {
             type = 'judge';
         }
-        return { ...q, title: cleanText(title), options, type, qid };
+        return { ...q, title: cleanText(title), options, type, qid, blanks };
     });
 }
 
@@ -103,15 +110,26 @@ async function applyAnswers(frame, questions, answers){
             }
 
             if (q.type === 'fill') {
-                const editor = window['answerEditor' + q.qid + '_1'];
-                if (!editor || typeof editor.setContent !== 'function') {
-                    result.failed.push({ qid: q.qid, reason: '未找到填空编辑器' });
-                    continue;
+                const blankCount = q.blanks || 1;
+                let list = Array.isArray(answer) ? answer.slice() : [String(answer)];
+                //模型偶尔会把多个空合并成一个字符串，按常见分隔符拆分
+                if (blankCount > 1 && list.length === 1) {
+                    list = String(list[0]).split(/[、,，;；|]/).map(s => s.trim()).filter(Boolean);
                 }
-                const text = Array.isArray(answer) ? answer.join('') : String(answer);
-                const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                editor.setContent('<p>' + safe + '</p>');
-                if (typeof editor.sync === 'function') { editor.sync(); }
+                if (list.length < blankCount) {
+                    result.failed.push({ qid: q.qid, reason: `答案数量不足（${list.length}/${blankCount}）` });
+                }
+                for (let i = 0; i < blankCount; i++) {
+                    const editor = window['answerEditor' + q.qid + '_' + (i + 1)];
+                    if (!editor || typeof editor.setContent !== 'function') {
+                        result.failed.push({ qid: q.qid, reason: `未找到第 ${i + 1} 空编辑器` });
+                        continue;
+                    }
+                    const safe = String(list[i] === undefined ? '' : list[i])
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    editor.setContent('<p>' + safe + '</p>');
+                    if (typeof editor.sync === 'function') { editor.sync(); }
+                }
                 result.applied++;
                 continue;
             }
@@ -264,12 +282,30 @@ async function solveExercise(page, meta, point, openKnowledgePoint){
         } else if (q.type === 'judge') {
             options = { '对': q.options[0] ? q.options[0].text : '对', '错': q.options[1] ? q.options[1].text : '错' };
         }
-        return { id: q.qid, type: q.type, question: q.title, options };
+        return { id: q.qid, type: q.type, blanks: q.type === 'fill' ? (q.blanks || 1) : undefined, question: q.title, options };
     });
 
     console.log('  正在请求 DeepSeek 生成答案...');
     const answers = await answerQuestions(aiPayload, 10);
     console.log(`  已获取 ${Object.keys(answers).length}/${questions.length} 道题的答案`);
+
+    //规范化填空题答案：多空必须是数组
+    for (const q of questions) {
+        if (q.type !== 'fill') { continue; }
+        let value = answers[q.qid];
+        if (value === undefined || value === null) { continue; }
+        if ((q.blanks || 1) > 1) {
+            if (!Array.isArray(value)) {
+                value = String(value).split(/[、,，;；|]/).map(s => s.trim()).filter(Boolean);
+            }
+            if (value.length !== q.blanks) {
+                console.log(`  警告：填空第 ${q.index + 1} 题应有 ${q.blanks} 个答案，模型返回 ${value.length} 个`);
+            }
+            answers[q.qid] = value;
+        } else {
+            answers[q.qid] = Array.isArray(value) ? value.join('') : String(value);
+        }
+    }
 
     const applyResult = await applyAnswers(work, questions, answers);
     console.log(`  已填写 ${applyResult.applied} 题${applyResult.failed.length ? `，失败 ${applyResult.failed.length} 题` : ''}`);
@@ -282,8 +318,11 @@ async function solveExercise(page, meta, point, openKnowledgePoint){
         const out = [];
         for (const q of qs) {
             if (q.type === 'fill') {
-                const ed = window['answerEditor' + q.qid + '_1'];
-                out.push({ qid: q.qid, value: ed ? ed.getContent() : '' });
+                const blankCount = q.blanks || 1;
+                for (let i = 1; i <= blankCount; i++) {
+                    const ed = window['answerEditor' + q.qid + '_' + i];
+                    out.push({ qid: q.qid, blank: i, value: ed ? ed.getContent() : '' });
+                }
             } else {
                 const input = document.getElementById('answer' + q.qid);
                 out.push({ qid: q.qid, value: input ? input.value : '' });

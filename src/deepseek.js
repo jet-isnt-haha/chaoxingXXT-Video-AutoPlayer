@@ -77,7 +77,7 @@ async function answerQuestions(questions, batchSize = 10){
         'single：单选题，答案写一个选项字母，如 "C"',
         'multi：多选题，答案写选项字母数组，如 ["A","C"]',
         'judge：判断题，答案写 "对" 或 "错"',
-        'fill：填空题，答案写填入空的简短文本',
+        'fill：填空题，答案写填入空的简短文本；如果题目带有 blanks 字段，答案必须是按空顺序排列的数组，长度等于 blanks',
     ].join('\n');
 
     for (let b = 0; b < batches.length; b++) {
